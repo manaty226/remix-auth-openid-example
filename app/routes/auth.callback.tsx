@@ -1,13 +1,21 @@
-import type { LoaderFunctionArgs } from "@remix-run/node";
-import { authenticator } from "app/modules/auth/auth.server";
+import { redirect, type LoaderFunctionArgs } from "react-router";
+import { getUserSession } from "app/modules/auth/auth.server";
 
 export async function loader({ request }: LoaderFunctionArgs) {
-  return await authenticator.authenticate("keycloak", request, {
-    successRedirect: "/success",
-    failureRedirect: "/",
-  });
+    try {
+        const user = await getUserSession(request);
+        if (user) {
+            throw redirect("/success");
+        }
+    } catch (e) {
+        if (e instanceof Response) {
+            throw e;
+        }
+        console.error(e);
+        redirect("/");
+    }
 }
 
 export default function Calback() {
-  return <></>;
+    return <></>;
 }

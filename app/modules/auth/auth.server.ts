@@ -1,20 +1,19 @@
+import { redirect } from "react-router";
 import { Authenticator } from "remix-auth";
-import type { SessionStorage, Session, SessionData } from "@remix-run/server-runtime";
-import { redirect } from "@remix-run/server-runtime";
-import { authSessionStorage } from "./auth-session.server";
 import { OIDCStrategy } from "remix-auth-openid";
-import type { OIDCStrategyBaseUser } from "remix-auth-openid";
+import { clearSession, getSession, setSession } from "./auth-session.server";
 
-interface User extends OIDCStrategyBaseUser {
+export interface User extends OIDCStrategy.BaseUser {
     name?: string;
 }
 
-let authenticator = new Authenticator<User>(authSessionStorage, {});
+let authenticator = new Authenticator<User>();
 const strategy = await OIDCStrategy.init<User>({
     issuer: "http://localhost:8080/realms/master",
-    client_id: "YOUR CLIENT ID",
-    client_secret: "<YOUR CLIENT SECRET>",
+    client_id: "test-client",
+    client_secret: "0zjWQhiY7kGGkY5HecAp7cTrQ7vD8U09",
     redirect_uris: ["http://localhost:5173/auth/callback"],
+    post_logout_redirect_uris: ["http://localhost:/login"],
     scopes: ["openid"],
 }, async ({tokens, request}): Promise<User> => {
 
@@ -27,50 +26,51 @@ const strategy = await OIDCStrategy.init<User>({
     }
 
     return {
-        ...tokens.claims(),
+        sub: tokens.claims().sub,
         accessToken: tokens.access_token,
         idToken: tokens.id_token,
         refreshToken: tokens.refresh_token,
-        expiredAt: new Date().getTime() / 1000 + (tokens.expires_in ?? 0),
+        expiredAt: Math.floor(new Date().getTime() / 1000) + (tokens.expires_in ?? 0),
     }
 })
 
 authenticator.use(strategy, "keycloak");
 
-interface UserSession {
-    user: User;
-    session: Session<SessionData, SessionData>
-}
-
-async function getSession(request:Request): Promise<UserSession> {
-    const user = await authenticator.isAuthenticated(request, {
-        failureRedirect: "/login",
-    })
-
-    const session = await authSessionStorage.getSession(request.headers.get("Cookie"));
-
-    // refresh access_token if the expiration is approaching
-    if (user.expiredAt < new Date().getTime() + 60 * 1000) {
-        const tokens = await strategy.refresh(user.refreshToken ?? "", {failureRedirect: "/login"});
-        if (!tokens || !tokens?.access_token) {
-            return await authenticator.logout(request, {redirectTo: "/login"});
+async function getUserSession(request:Request): Promise<User | null> {
+    const user = await getSession<User>(request);
+    console.log("[getUserSession] user is", user);
+    if (!user) {
+        try {
+            const user = await authenticator.authenticate("keycloak", request);
+            const headers = await setSession(request, user);
+            throw redirect("/success", { headers: headers });
+        } catch(e) {
+            if (e instanceof Response) {
+                throw e;
+            }
+            console.error(e)
+            throw redirect("/");
         }
-        const newUser = {...user, accessToken: tokens.access_token, refreshToken: tokens.refresh_token};
-        session.set(authenticator.sessionKey, newUser);
-        await authSessionStorage.commitSession(session);
-        return {user: newUser, session}
     }
-
-    return {user, session}
+    return user
 }
 
 async function logout(request: Request) {
-    const user = await authenticator.isAuthenticated(request);
+    const user = await getUserSession(request);
     if (!user) {
-        return await authenticator.logout(request, {redirectTo: "/login"});
+        return redirect("/login");
     }
-    const redirectTo = strategy.logoutUrl(user.idToken ?? "");
-    return await authenticator.logout(request, {redirectTo: redirectTo})
+
+    try {
+        await strategy.postLogoutUrl(user.idToken ?? "");
+        const header = await clearSession(request);
+        throw redirect("/login", { headers: header });
+    } catch(e) {
+        if (e instanceof Response) {
+            return e;
+        }
+        throw e;
+    }
 }
 
-export { authenticator, getSession, logout };
+export { authenticator, getUserSession, logout };
